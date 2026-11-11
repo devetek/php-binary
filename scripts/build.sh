@@ -68,7 +68,7 @@ if [ -f "${EXT_DIR}/opcache.so" ]; then
   echo "zend_extension=opcache" > "${PREFIX}/conf.d/10-opcache.ini"
 fi
 : > "${WORK}/pecl-built.txt"
-grep -Ev '^\s*(#|$)' "${HERE}/pecl-extensions.txt" | while read -r ext version; do
+"${HERE}/pecl-select.py" "${HERE}/pecl-extensions.txt" "${PHP_VERSION}" | while read -r ext version; do
   cd "${WORK}"
   curl -fsSL -o "${ext}-${version}.tgz" "https://pecl.php.net/get/${ext}-${version}.tgz"
   rm -rf "${ext}-${version}"

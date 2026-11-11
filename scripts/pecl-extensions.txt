@@ -1,6 +1,9 @@
-# PECL extensions built for every PHP build: name version
+# PECL extensions built for every PHP build: name version [from PHP branch]
+# For each extension the line with the highest "from" branch not above the
+# PHP being built wins; a line without one applies to every branch.
 # Bump a version here to ship it in the next builds.
 igbinary 3.2.16
+igbinary 3.2.17RC1 8.5
 apcu 5.1.28
 redis 6.3.0
 imagick 3.8.1
