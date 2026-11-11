@@ -25,7 +25,18 @@ JOBS="$(nproc)"
 
 . /etc/os-release
 ARCH="$(dpkg --print-architecture)"
-NAME="php-${PHP_VERSION}-${ID}-${VERSION_ID}-${ARCH}"
+MAJOR="${PHP_VERSION%%.*}"
+MINOR="$(echo "${PHP_VERSION}" | cut -d. -f2)"
+# PHP 8.0 and older need OpenSSL 1.x and old ICU: they are built on an old
+# OS (Ubuntu 18.04, or 16.04 for 5.6) and carry those libraries with them,
+# so one archive per CPU runs on every newer Debian and Ubuntu.
+LEGACY=0
+if [ "${MAJOR}" -lt 8 ] || { [ "${MAJOR}" -eq 8 ] && [ "${MINOR}" -eq 0 ]; }; then
+  LEGACY=1
+  NAME="php-${PHP_VERSION}-linux-${ARCH}"
+else
+  NAME="php-${PHP_VERSION}-${ID}-${VERSION_ID}-${ARCH}"
+fi
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -34,10 +45,26 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # The plugin installs PHP's own build dependencies. These are for mise and
 # for the options and PECL extensions dPanel adds.
-apt-get install -y -qq --no-install-recommends \
-  ca-certificates curl git xz-utils file python3 \
-  libavif-dev libxslt1-dev libffi-dev libargon2-dev libsystemd-dev \
-  libmagickwand-dev libmemcached-dev >/dev/null
+packages=(ca-certificates curl git xz-utils file python3
+  libxslt1-dev libffi-dev libsystemd-dev libmagickwand-dev libmemcached-dev)
+if [ "${LEGACY}" = 1 ]; then
+  packages+=(patchelf)
+  # bison 2.7 is compiled below, before the plugin installs its toolchain.
+  [ "${MAJOR}" -lt 7 ] && packages+=(libmcrypt-dev build-essential m4)
+  apt-cache show libargon2-0-dev >/dev/null 2>&1 && packages+=(libargon2-0-dev)
+else
+  packages+=(libavif-dev libargon2-dev)
+fi
+apt-get install -y -qq --no-install-recommends "${packages[@]}" >/dev/null
+
+if [ "${MAJOR}" -lt 7 ]; then
+  # PHP 5.6 regenerates its parsers with bison 2.x and looks for gmp.h in
+  # /usr/include only.
+  (cd /tmp && curl -fsSL https://ftp.gnu.org/gnu/bison/bison-2.7.1.tar.xz | tar -xJ &&
+    cd bison-2.7.1 && ./configure --prefix=/usr/local >/dev/null && make -j"${JOBS}" >/dev/null && make install >/dev/null)
+  ln -sf "/usr/include/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/gmp.h" /usr/include/gmp.h
+  export PATH="/usr/local/bin:${PATH}"
+fi
 
 curl -fsSL https://mise.run | MISE_VERSION="${MISE_VERSION}" MISE_INSTALL_PATH=/usr/local/bin/mise sh >/dev/null
 mise --version
@@ -51,7 +78,14 @@ log "Build PHP ${PHP_VERSION} with the plugin"
 export MISE_EXPERIMENTAL=1
 # Compile here: this build is what servers download.
 export PHP_DPANEL_PREBUILT=0
-export PHP_EXTRA_CONFIGURE_OPTIONS="--with-fpm-systemd --with-fpm-user=www-data --with-fpm-group=www-data --with-avif --with-xsl --with-ffi --with-password-argon2 --with-pdo-sqlite --with-sqlite3"
+extra="--with-fpm-systemd --with-fpm-user=www-data --with-fpm-group=www-data --with-xsl --with-pdo-sqlite --with-sqlite3"
+[ "${LEGACY}" = 0 ] && extra+=" --with-avif"
+# FFI exists from PHP 7.4, Argon2 passwords from 7.2.
+{ [ "${MAJOR}" -ge 8 ] || { [ "${MAJOR}" -eq 7 ] && [ "${MINOR}" -ge 4 ]; }; } && extra+=" --with-ffi"
+{ [ "${MAJOR}" -ge 8 ] || { [ "${MAJOR}" -eq 7 ] && [ "${MINOR}" -ge 2 ]; }; } && extra+=" --with-password-argon2"
+# Legacy PHP 5 applications still call mysql_* and mcrypt_*.
+[ "${MAJOR}" -lt 7 ] && extra+=" --with-mysql=mysqlnd --with-mcrypt"
+export PHP_EXTRA_CONFIGURE_OPTIONS="${extra}"
 # SKIP_PHP_BUILD=1 reuses PHP already built in this container, to redo only
 # the steps after it.
 if [ "${SKIP_PHP_BUILD:-0}" != 1 ]; then
@@ -65,7 +99,7 @@ mkdir -p "${WORK}" "${DIST}" "${PREFIX}/conf.d"
 EXT_DIR="$("${PREFIX}/bin/php-config" --extension-dir)"
 # OPcache is built but not loaded; every production site wants it.
 if [ -f "${EXT_DIR}/opcache.so" ]; then
-  echo "zend_extension=opcache" > "${PREFIX}/conf.d/10-opcache.ini"
+  echo "zend_extension=opcache.so" > "${PREFIX}/conf.d/10-opcache.ini"
 fi
 : > "${WORK}/pecl-built.txt"
 "${HERE}/pecl-select.py" "${HERE}/pecl-extensions.txt" "${PHP_VERSION}" | while read -r ext version; do
@@ -76,16 +110,18 @@ fi
   cd "${ext}-${version}"
   "${PREFIX}/bin/phpize" >/dev/null
   case "${ext}" in
-    redis) extra=(--enable-redis-igbinary) ;;
-    memcached) extra=(--enable-memcached-igbinary) ;;
-    *) extra=() ;;
+    redis) pecl_flags="--enable-redis-igbinary" ;;
+    memcached) pecl_flags="--enable-memcached-igbinary" ;;
+    *) pecl_flags="" ;;
   esac
-  ./configure --with-php-config="${PREFIX}/bin/php-config" "${extra[@]}" >/dev/null
+  # shellcheck disable=SC2086
+  ./configure --with-php-config="${PREFIX}/bin/php-config" ${pecl_flags} >/dev/null
   make -j"${JOBS}" >/dev/null
   make install >/dev/null
   # igbinary first: redis and memcached load it.
   order=20; [ "${ext}" = igbinary ] && order=15
-  echo "extension=${ext}" > "${PREFIX}/conf.d/${order}-${ext}.ini"
+  # With ".so": PHP before 7.2 does not add it.
+  echo "extension=${ext}.so" > "${PREFIX}/conf.d/${order}-${ext}.ini"
   echo "${ext} ${version}" >> "${WORK}/pecl-built.txt"
 done
 
@@ -97,10 +133,19 @@ for entry in "${PREFIX}"/* "${PREFIX}"/.[!.]*; do
   case "${keep}" in *" $(basename "${entry}") "*) ;; *) rm -rf "${entry}" ;; esac
 done
 
-log "Runtime packages"
-# The OS packages that provide the shared libraries PHP and its extensions
-# link to. Servers install these, and no compiler.
-"${HERE}/runtime-packages.py" "${PREFIX}" > "${PREFIX}/runtime-packages.txt"
+# Strip before bundling: old binutils cannot strip files patchelf rewrote.
+find "${PREFIX}" -type f \( -perm -u+x -o -name '*.so' \) -exec sh -c 'if file "$1" | grep -q ELF; then strip --strip-unneeded "$1"; fi' _ {} \;
+
+if [ "${LEGACY}" = 1 ]; then
+  log "Bundle libraries"
+  python3 "${HERE}/bundle-libs.py" "${PREFIX}"
+  : > "${PREFIX}/runtime-packages.txt"
+else
+  log "Runtime packages"
+  # The OS packages that provide the shared libraries PHP and its extensions
+  # link to. Servers install these, and no compiler.
+  "${HERE}/runtime-packages.py" "${PREFIX}" > "${PREFIX}/runtime-packages.txt"
+fi
 tr '\n' ' ' < "${PREFIX}/runtime-packages.txt"; echo
 
 python3 - "${PREFIX}/build-info.json" <<PY
@@ -108,6 +153,7 @@ import json, sys
 pecl = dict(line.split() for line in open("${WORK}/pecl-built.txt"))
 json.dump({
     "php": "${PHP_VERSION}", "os": "${ID}", "os_release": "${VERSION_ID}", "arch": "${ARCH}",
+    "bundled_libraries": ${LEGACY} == 1,
     "prefix": "${PREFIX}", "mise": "${MISE_VERSION}",
     "plugin": "${PLUGIN_URL}#${PLUGIN_COMMIT}",
     "pecl": pecl,
@@ -117,7 +163,6 @@ PY
 curl -fsSL -o "${PREFIX}/LICENSE" "https://raw.githubusercontent.com/php/php-src/php-${PHP_VERSION}/LICENSE"
 
 log "Package"
-find "${PREFIX}" -type f \( -perm -u+x -o -name '*.so' \) -exec sh -c 'if file "$1" | grep -q ELF; then strip --strip-unneeded "$1"; fi' _ {} \;
 tar -C "${INSTALL_ROOT}" -cJf "${DIST}/${NAME}.tar.xz" "${PHP_VERSION}"
 (cd "${DIST}" && sha256sum "${NAME}.tar.xz" > "${NAME}.tar.xz.sha256")
 ls -la "${DIST}/${NAME}.tar.xz"

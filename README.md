@@ -19,10 +19,23 @@ php-8.4.27-ubuntu-24.04-arm64.tar.xz
 php-8.4.27-ubuntu-24.04-arm64.tar.xz.sha256
 ```
 
+Legacy PHP (8.0, 7.4, 7.3, 5.6) needs OpenSSL 1.x and old ICU, which current
+systems no longer ship. It is built on Ubuntu 18.04 (16.04 for 5.6) and carries
+those libraries in `lib/bundled`, so there is one archive per CPU that runs on
+every OS release above without installing packages:
+
+```
+php-5.6.40-linux-amd64.tar.xz
+```
+
+PHP 5.6 also has `mysql` and `mcrypt`, which old applications still call. The
+bundled OpenSSL gets no security updates any more: use legacy PHP only for
+applications that cannot move to a supported version.
+
 | | |
 | --- | --- |
-| PHP branches | 8.1, 8.2, 8.3, 8.4, 8.5 (the newest patch release of each); 8.0, 7.4, 7.3 and 5.6 follow |
-| OS releases | Ubuntu 22.04, 24.04, 26.04; Debian 12, 13 |
+| PHP branches | 8.1, 8.2, 8.3, 8.4, 8.5 (the newest patch release of each); legacy 8.0, 7.4, 7.3 and 5.6 (their final releases) |
+| OS releases | Ubuntu 22.04, 24.04, 26.04; Debian 12, 13 (legacy builds run on all of them) |
 | CPUs | amd64, arm64 |
 | Install path | `/usr/local/share/mise/installs/php/X.Y.Z`, where `mise install --system` puts tools, shared by every user of the server |
 | SAPIs | CLI and PHP-FPM (with systemd notify) |
@@ -71,7 +84,7 @@ build somewhere else, set `PHPRC` and `PHP_INI_SCAN_DIR` to its directory and
   day.
 - **By hand** (Run workflow) it builds the versions you type, or rebuilds
   existing ones.
-- **On a pull request** it builds one version on Ubuntu 24.04 for both CPUs,
+- **On a pull request** it builds the oldest and newest PHP for both CPUs,
   without publishing.
 
 Each build runs [scripts/build.sh](scripts/build.sh) in a container of its OS
