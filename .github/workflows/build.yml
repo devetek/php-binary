@@ -56,10 +56,14 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/src -w /src ${{ matrix.image }} bash -c \
             'apt-get update -qq >/dev/null && apt-get install -y -qq curl ca-certificates python3 >/dev/null && scripts/build.sh ${{ matrix.php }}'
-      - name: Smoke test on a clean ${{ matrix.image }}
+      - name: Smoke test on a clean ${{ matrix.smoke }}
         run: |
-          docker run --rm -v "$PWD":/src -w /src ${{ matrix.image }} bash -c \
-            'apt-get update -qq >/dev/null && apt-get install -y -qq xz-utils >/dev/null && scripts/smoke-test.sh dist/*.tar.xz'
+          for image in ${{ matrix.smoke }}; do
+            echo "::group::smoke test on ${image}"
+            docker run --rm -v "$PWD":/src -w /src "${image}" bash -c \
+              'apt-get update -qq >/dev/null && apt-get install -y -qq xz-utils ca-certificates >/dev/null && scripts/smoke-test.sh dist/*.tar.xz'
+            echo "::endgroup::"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: php-${{ matrix.php }}-${{ matrix.target }}-${{ matrix.arch }}
@@ -91,6 +95,6 @@ jobs:
           [ -n "$(ls dist/*.tar.xz 2>/dev/null)" ] || { echo "no builds for ${{ matrix.php }}"; exit 1; }
           if ! gh release view "php-${{ matrix.php }}" >/dev/null 2>&1; then
             gh release create "php-${{ matrix.php }}" --title "PHP ${{ matrix.php }}" \
-              --notes "PHP ${{ matrix.php }} built from the php.net source release for Debian and Ubuntu, amd64 and arm64, for the prefix /usr/local/share/mise/installs/php/${{ matrix.php }}. Each archive lists its runtime packages in runtime-packages.txt."
+              --notes "PHP ${{ matrix.php }} built with mise and dPanel-ID/mise-php for Debian and Ubuntu, amd64 and arm64, for the prefix /usr/local/share/mise/installs/php/${{ matrix.php }}. Archives named <os>-<release> list their runtime packages in runtime-packages.txt; linux archives (PHP 8.0 and older) carry their own libraries and need no packages."
           fi
           gh release upload "php-${{ matrix.php }}" dist/* --clobber
