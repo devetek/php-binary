@@ -1,0 +1,96 @@
+name: Build PHP
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      php_versions:
+        description: "PHP versions to build, space separated (default: newest patch of each supported branch)"
+        required: false
+      rebuild:
+        description: "Build versions that already have a release"
+        type: boolean
+        default: false
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.plan.outputs.versions }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PHP_VERSIONS: ${{ inputs.php_versions }}
+          PULL_REQUEST: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          SKIP_RELEASED: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.rebuild)) && '1' || '0' }}
+        run: |
+          plan="$(scripts/plan.py)"
+          echo "$plan" | jq .
+          echo "versions=$(echo "$plan" | jq -c .versions)" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(echo "$plan" | jq -c .matrix)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.versions != '[]'
+    name: php ${{ matrix.php }} ${{ matrix.image }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          docker run --rm -v "$PWD":/src -w /src ${{ matrix.image }} bash -c \
+            'apt-get update -qq >/dev/null && apt-get install -y -qq curl ca-certificates python3 >/dev/null && scripts/build.sh ${{ matrix.php }}'
+      - name: Smoke test on a clean ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD":/src -w /src ${{ matrix.image }} bash -c \
+            'apt-get update -qq >/dev/null && apt-get install -y -qq xz-utils >/dev/null && scripts/smoke-test.sh dist/*.tar.xz'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ matrix.php }}-${{ matrix.target }}-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 7
+
+  release:
+    needs: [plan, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && !cancelled() && needs.plan.outputs.versions != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJson(needs.plan.outputs.versions) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: php-${{ matrix.php }}-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release php-${{ matrix.php }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls dist
+          [ -n "$(ls dist/*.tar.xz 2>/dev/null)" ] || { echo "no builds for ${{ matrix.php }}"; exit 1; }
+          if ! gh release view "php-${{ matrix.php }}" >/dev/null 2>&1; then
+            gh release create "php-${{ matrix.php }}" --title "PHP ${{ matrix.php }}" \
+              --notes "PHP ${{ matrix.php }} built from the php.net source release for Debian and Ubuntu, amd64 and arm64, for the prefix /usr/local/share/mise/installs/php/${{ matrix.php }}. Each archive lists its runtime packages in runtime-packages.txt."
+          fi
+          gh release upload "php-${{ matrix.php }}" dist/* --clobber
