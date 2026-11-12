@@ -69,7 +69,9 @@ fi
 curl -fsSL https://mise.run | MISE_VERSION="${MISE_VERSION}" MISE_INSTALL_PATH=/usr/local/bin/mise sh >/dev/null
 mise --version
 # Pin the plugin to one commit, recorded in build-info.json.
-PLUGIN_COMMIT="$(git ls-remote "${PLUGIN_URL}" "${PLUGIN_REF}" | cut -f1 | head -1)"
+# From /tmp: the checkout belongs to another user, and git refuses to run
+# inside it ("unsafe repository") on Ubuntu 18.04.
+PLUGIN_COMMIT="$(cd /tmp && git ls-remote "${PLUGIN_URL}" "${PLUGIN_REF}" | cut -f1 | head -1)"
 PLUGIN_COMMIT="${PLUGIN_COMMIT:-${PLUGIN_REF}}"
 mise plugin uninstall php >/dev/null 2>&1 || true
 mise plugin install php "${PLUGIN_URL}#${PLUGIN_COMMIT}"
